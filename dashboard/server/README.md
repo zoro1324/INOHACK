@@ -1,5 +1,9 @@
 # Animal Detection & Alert System - Backend API
 
+## ✅ **DOCUMENTATION FIXED - All Errors Corrected!**
+
+> **Quick Fix:** Had server startup issues? The logs directory is now **auto-created**. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for all fixes.
+
 ## 🎯 Project Overview
 
 A comprehensive Django REST Framework backend for real-time animal movement detection and alert system using IoT devices (ESP32 cameras) with AI-powered detection and role-based access control.
@@ -52,30 +56,40 @@ A comprehensive Django REST Framework backend for real-time animal movement dete
 ```bash
 Python 3.10+
 MySQL 8.0+
-Redis 6.0+
+Redis 6.0+ (optional, for Celery)
 ```
 
 ### Installation
 
 ```bash
-# 1. Clone repository
-git clone <your-repo-url>
+# 1. Navigate to server directory
 cd INOHACK/dashboard/server
 
 # 2. Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Windows PowerShell:
+.\venv\Scripts\Activate.ps1
+
+# Windows CMD:
+venv\Scripts\activate.bat
+
+# Linux/Mac:
+source venv/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
 # 4. Setup environment
-cp .env.example .env
-# Edit .env with your configuration
+cp .env.example .env  # Linux/Mac
+Copy-Item .env.example .env  # Windows PowerShell
+
+# ⚠️ IMPORTANT: Edit .env and set your MySQL password!
+# DB_PASSWORD=your-actual-mysql-password
 
 # 5. Setup database
 mysql -u root -p
-CREATE DATABASE animal_detection_db;
+CREATE DATABASE animal_detection_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 EXIT;
 
 # 6. Run migrations
@@ -85,12 +99,14 @@ python manage.py migrate
 # 7. Create superuser
 python manage.py createsuperuser
 
-# 8. Create logs directory
-mkdir logs
+# 8. Create media directory (logs is auto-created now!)
+mkdir media
 
 # 9. Run development server
 python manage.py runserver
 ```
+
+**✅ Server should now be running at http://localhost:8000/**
 
 ### Start Background Workers
 
@@ -554,6 +570,36 @@ chmod 755 media/
 - [Django Documentation](https://docs.djangoproject.com/)
 - [DRF Documentation](https://www.django-rest-framework.org/)
 
+## 🐛 Troubleshooting
+
+### Common Issues
+
+**Server won't start - "logs directory not found"**
+- ✅ **FIXED!** - Logs directory is now auto-created by Django
+
+**MySQL connection error**
+```bash
+# Check if MySQL is running
+Get-Service MySQL*  # Windows
+sudo systemctl status mysql  # Linux
+
+# Verify credentials in .env file
+DB_PASSWORD=your-actual-password  # Must match your MySQL password
+```
+
+**mysqlclient installation fails (Windows)**
+```bash
+# Install Visual C++ Build Tools first
+# Or use PyMySQL as alternative - see TROUBLESHOOTING.md
+```
+
+**"No module named 'corsheaders'"**
+```bash
+pip install -r requirements.txt
+```
+
+**For more issues, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)** ⭐
+
 ## 🤝 Contributing
 
 1. Fork the repository
@@ -573,7 +619,8 @@ chmod 755 media/
 ## 📧 Support
 
 For issues and questions:
-- Email: support@example.com
+- Check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) first
+- Review logs: `logs/django.log`
 - GitHub Issues: [Create Issue]
 
 ---
