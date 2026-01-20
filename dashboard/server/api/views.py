@@ -1,520 +1,670 @@
-from django.shortcuts import render
-from rest_framework import viewsets, status, generics
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework import status, generics
+from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.utils import timezone
-from django.db.models import Count, Q
-from django.conf import settings
+from django.contrib.auth.models import User
+from django.shortcuts import get_object_or_404
+from django.core.files.base import ContentFile
+from pathlib import Path
+from PIL import Image
+import io
 
-from .models import (
-    User, IoTDevice, ImageCapture, AnimalDetection,
-    Alert, AuditLog
-)
+from .models import Device, DeviceMessage, CapturedImage
 from .serializers import (
-    UserRegistrationSerializer, UserLoginSerializer, UserSerializer,
-    UserProfileUpdateSerializer, IoTDeviceSerializer, DeviceClaimSerializer,
-    DeviceHeartbeatSerializer, ImageCaptureSerializer, ImageUploadSerializer,
-    AnimalDetectionSerializer, DetectionVerificationSerializer,
-    AlertSerializer, AlertAcknowledgeSerializer, AuditLogSerializer,
-    DashboardStatsSerializer
+    UserSerializer,
+    SignupSerializer,
+    LoginSerializer,
+    LogoutSerializer,
+    DeviceSerializer,
+    DeviceRegisterSerializer,
+    DeviceUpdateSerializer,
+    DeviceMessageSerializer,
+    DeviceMessageCreateSerializer,
+    CapturedImageSerializer,
+    CapturedImageUploadSerializer,
 )
-from .permissions import (
-    IsFarmer, IsRanger, IsAdmin, IsFarmerOrRanger,
-    IsRangerOrAdmin, IsOwnerOrRanger, IsDeviceOwner,
-    CanVerifyDetection
-)
-from .utils import (
-    calculate_distance, create_audit_log, generate_device_api_key,
-    validate_image_file
-)
-from .tasks import process_image_with_ai
-
-import logging
-
-logger = logging.getLogger(__name__)
+from .notifications import send_wildlife_alerts
 
 
-# ============================================================================
-# AUTHENTICATION VIEWS
-# ============================================================================
+# ==================== Authentication Views ====================
 
-class UserRegistrationView(generics.CreateAPIView):
-    """
-    API endpoint for user registration
-    POST /api/auth/register
-    """
-    queryset = User.objects.all()
-    serializer_class = UserRegistrationSerializer
+class SignupView(APIView):
+    """Register a new user."""
     permission_classes = [AllowAny]
     
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
+    def post(self, request):
+        serializer = SignupSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+            
+            return Response({
+                "message": "User registered successfully.",
+                "user": UserSerializer(user).data,
+                "tokens": {
+                    "refresh": str(refresh),
+                    "access": str(refresh.access_token),
+                }
+            }, status=status.HTTP_201_CREATED)
         
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-        
-        return Response({
-            'user': UserSerializer(user).data,
-            'tokens': {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            }
-        }, status=status.HTTP_201_CREATED)
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class UserLoginView(generics.GenericAPIView):
-    """
-    API endpoint for user login
-    POST /api/auth/login
-    """
-    serializer_class = UserLoginSerializer
+class LoginView(APIView):
+    """Login user with username/email/mobile and password."""
     permission_classes = [AllowAny]
     
-    def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.validated_data['user']
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.validated_data['user']
+            
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+            
+            return Response({
+                "message": "Login successful.",
+                "user": UserSerializer(user).data,
+                "tokens": {
+                    "refresh": str(refresh),
+                    "access": str(refresh.access_token),
+                }
+            }, status=status.HTTP_200_OK)
         
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-        
-        # Update last login
-        user.last_login = timezone.now()
-        user.save(update_fields=['last_login'])
-        
-        return Response({
-            'user': UserSerializer(user).data,
-            'tokens': {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            }
-        })
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class UserProfileView(generics.RetrieveUpdateAPIView):
-    """
-    API endpoint to get and update current user profile
-    GET /api/auth/me
-    PATCH /api/auth/me
-    """
-    serializer_class = UserSerializer
+class LogoutView(APIView):
+    """Logout user by blacklisting the refresh token."""
     permission_classes = [IsAuthenticated]
     
-    def get_object(self):
-        return self.request.user
-    
-    def get_serializer_class(self):
-        if self.request.method == 'PATCH':
-            return UserProfileUpdateSerializer
-        return UserSerializer
+    def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+                token = RefreshToken(serializer.validated_data['refresh'])
+                token.blacklist()
+                return Response({"message": "Logout successful."}, status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": f"Logout failed: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
-# ============================================================================
-# DEVICE MANAGEMENT VIEWS
-# ============================================================================
-
-class IoTDeviceViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for IoT Device management
-    
-    Farmers can only see their own devices
-    Rangers can see all devices
-    """
-    serializer_class = IoTDeviceSerializer
+class UserProfileView(APIView):
+    """Get or update current user profile information."""
     permission_classes = [IsAuthenticated]
     
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.role == 'RANGER' or user.role == 'ADMIN':
-            # Rangers and Admins can see all devices
-            queryset = IoTDevice.objects.all()
-            create_audit_log(
-                user, 'VIEW_DEVICE', 'IoTDevice', 'all',
-                self.request, {'action': 'list_all'}
-            )
-        else:
-            # Farmers can only see their own devices
-            queryset = IoTDevice.objects.filter(owner=user)
-        
-        # Filters
-        is_active = self.request.query_params.get('is_active', None)
-        if is_active is not None:
-            queryset = queryset.filter(is_active=is_active.lower() == 'true')
-        
-        return queryset.select_related('owner').order_by('-created_at')
+    def get(self, request):
+        serializer = UserSerializer(request.user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
     
-    def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
+    def put(self, request):
+        """Update user profile (home location, mobile, name)."""
+        from .serializers import UserProfileUpdateSerializer
         
-        # Audit log
-        create_audit_log(
-            request.user, 'VIEW_DEVICE', 'IoTDevice', instance.id,
-            request
+        serializer = UserProfileUpdateSerializer(
+            data=request.data, 
+            context={'user': request.user}
         )
+        if serializer.is_valid():
+            user = serializer.update(request.user, serializer.validated_data)
+            return Response({
+                "message": "Profile updated successfully.",
+                "user": UserSerializer(user).data
+            }, status=status.HTTP_200_OK)
         
-        return super().retrieve(request, *args, **kwargs)
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserDevicesView(APIView):
+    """Manage user's own devices."""
+    permission_classes = [IsAuthenticated]
     
-    @action(detail=False, methods=['post'], permission_classes=[IsFarmer])
-    def claim(self, request):
-        """
-        Claim an unclaimed device
-        POST /api/devices/claim
-        """
-        serializer = DeviceClaimSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+    def get(self, request):
+        """Get all devices owned by the current user."""
+        devices = Device.objects.filter(owned_by=request.user)
+        serializer = DeviceSerializer(devices, many=True, context={'request': request})
+        return Response({
+            "count": devices.count(),
+            "devices": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+    def post(self, request):
+        """Add a new device to user's account."""
+        from .serializers import AddDeviceSerializer
         
-        device_uid = serializer.validated_data['device_uid']
+        serializer = AddDeviceSerializer(
+            data=request.data,
+            context={'user': request.user}
+        )
+        if serializer.is_valid():
+            device, created = serializer.save()
+            device_serializer = DeviceSerializer(device, context={'request': request})
+            return Response({
+                "status": "success",
+                "message": "Device added successfully" if created else "Device linked to your account",
+                "device": device_serializer.data
+            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+    
+    def delete(self, request):
+        """Remove a device from user's account."""
+        device_id = request.query_params.get('device_id')
+        if not device_id:
+            return Response({"error": "device_id is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            # Try to get existing device
-            device = IoTDevice.objects.get(device_uid=device_uid)
-            if device.is_claimed():
-                return Response(
-                    {'error': 'Device already claimed'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            device.owner = request.user
-        except IoTDevice.DoesNotExist:
-            # Create new device
-            device = IoTDevice(
-                device_uid=device_uid,
-                owner=request.user,
-                api_key=generate_device_api_key()
-            )
-        
-        # Update device details
-        device.device_name = serializer.validated_data.get(
-            'device_name', f"Device {device_uid}"
-        )
-        device.latitude = serializer.validated_data['latitude']
-        device.longitude = serializer.validated_data['longitude']
-        device.location_name = serializer.validated_data.get('location_name', '')
-        device.save()
-        
-        logger.info(f"Device {device_uid} claimed by user {request.user.username}")
-        
-        return Response(
-            IoTDeviceSerializer(device).data,
-            status=status.HTTP_200_OK
-        )
+            device = Device.objects.get(device_id=device_id, owned_by=request.user)
+            device.owned_by = None
+            device.save()
+            return Response({
+                "status": "success",
+                "message": "Device removed from your account"
+            }, status=status.HTTP_200_OK)
+        except Device.DoesNotExist:
+            return Response({"error": "Device not found or not owned by you"}, status=status.HTTP_404_NOT_FOUND)
+
+
+# ==================== Device Views ====================
+
+class DeviceListView(generics.ListAPIView):
+    """List all devices or filter by device_id."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = DeviceSerializer
     
-    @action(detail=True, methods=['post'])
-    def heartbeat(self, request, pk=None):
-        """
-        Device heartbeat endpoint
-        POST /api/devices/{id}/heartbeat
-        """
-        device = self.get_object()
+    def get_queryset(self):
+        queryset = Device.objects.all()
+        device_id = self.request.query_params.get('device_id')
+        if device_id:
+            queryset = queryset.filter(device_id=device_id)
+        return queryset
+    
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        device_id = request.query_params.get('device_id')
         
-        # Check ownership or ranger permission
-        if device.owner != request.user and request.user.role != 'RANGER':
-            return Response(
-                {'error': 'Permission denied'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        if device_id:
+            # Return single device
+            device = queryset.first()
+            if not device:
+                return Response({"error": "Device not found"}, status=status.HTTP_404_NOT_FOUND)
+            serializer = self.get_serializer(device)
+            return Response(serializer.data)
         
-        serializer = DeviceHeartbeatSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        # Update last seen
-        device.last_seen_at = timezone.now()
-        
-        # Update firmware if provided
-        if 'firmware_version' in serializer.validated_data:
-            device.firmware_version = serializer.validated_data['firmware_version']
-        
-        device.save()
-        
+        # Return all devices
+        serializer = self.get_serializer(queryset, many=True)
         return Response({
-            'status': 'ok',
-            'buzzer_command': 'ON' if device.buzzer_active else 'OFF'
+            "count": queryset.count(),
+            "devices": serializer.data
         })
 
 
-# ============================================================================
-# IMAGE AND DETECTION VIEWS
-# ============================================================================
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def image_upload_view(request):
-    """
-    ESP32 image upload endpoint
-    POST /api/images/upload
+class DeviceRegisterView(APIView):
+    """Register or update device information."""
+    permission_classes = [AllowAny]
     
-    No JWT required - uses device_uid + api_key authentication
-    """
-    serializer = ImageUploadSerializer(data=request.data)
-    serializer.is_valid(raise_exception=True)
-    
-    device = serializer.validated_data['device']
-    image_file = serializer.validated_data['image']
-    
-    # Validate image
-    is_valid, error_msg = validate_image_file(image_file)
-    if not is_valid:
-        return Response(
-            {'error': error_msg},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Create image capture
-    image_capture = ImageCapture.objects.create(
-        device=device,
-        image=image_file,
-        captured_at=serializer.validated_data['captured_at'],
-        file_size=image_file.size
-    )
-    
-    # Update device last seen
-    device.last_seen_at = timezone.now()
-    device.save(update_fields=['last_seen_at'])
-    
-    # Trigger async AI processing
-    process_image_with_ai.delay(str(image_capture.id))
-    
-    logger.info(f"Image uploaded from device {device.device_uid}")
-    
-    return Response({
-        'status': 'success',
-        'image_id': str(image_capture.id),
-        'message': 'Image received and queued for processing'
-    }, status=status.HTTP_201_CREATED)
+    def post(self, request):
+        serializer = DeviceRegisterSerializer(data=request.data)
+        if serializer.is_valid():
+            device, created = serializer.save()
+            device_serializer = DeviceSerializer(device)
+            
+            return Response({
+                "status": "success",
+                "message": "Device registered" if created else "Device updated",
+                "device": device_serializer.data
+            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class ImageCaptureViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet for viewing image captures
-    
-    Farmers can only see images from their devices
-    Rangers can see all images
-    """
-    serializer_class = ImageCaptureSerializer
+class DeviceDetailView(APIView):
+    """Edit or delete a device."""
     permission_classes = [IsAuthenticated]
+    
+    def get_object(self, device_id):
+        return get_object_or_404(Device, device_id=device_id)
+    
+    def put(self, request, device_id):
+        """Update device information."""
+        device = self.get_object(device_id)
+        serializer = DeviceUpdateSerializer(device, data=request.data, partial=True)
+        
+        if serializer.is_valid():
+            device = serializer.save()
+            device_serializer = DeviceSerializer(device)
+            
+            return Response({
+                "status": "success",
+                "message": "Device updated",
+                "device": device_serializer.data
+            }, status=status.HTTP_200_OK)
+        
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+    
+    def delete(self, request, device_id):
+        """Delete a device and all its associated data."""
+        device = self.get_object(device_id)
+        device_name = device.device_id
+        device.delete()
+        
+        return Response({
+            "status": "success",
+            "message": f"Device '{device_name}' deleted successfully"
+        }, status=status.HTTP_200_OK)
+
+
+# ==================== Device Message Views ====================
+
+class DeviceMessageView(APIView):
+    """Receive device connection messages/pings from ESP32."""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        serializer = DeviceMessageCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            device_message = serializer.save()
+            
+            return Response({
+                "status": "success",
+                "message": "Device message stored",
+                "device_id": device_message.device.device_id,
+                "timestamp": device_message.timestamp.isoformat()
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ==================== Captured Image Views ====================
+
+class CapturedImageView(APIView):
+    """Receive image from ESP32 and run YOLO classification."""
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._model = None
+    
+    def get_model(self):
+        """Lazy load YOLO model."""
+        if self._model is None:
+            from ultralytics import YOLO
+            model_path = Path(__file__).resolve().parent.parent.parent.parent / "best_models" / "best-20-e.pt"
+            
+            if not model_path.exists():
+                raise FileNotFoundError(f"YOLO model not found at {model_path}")
+            
+            self._model = YOLO(str(model_path))
+        return self._model
+    
+    def classify_image(self, image_file):
+        """Run YOLO classification on the image and return annotated image."""
+        model = self.get_model()
+        
+        # Read and process image
+        image_data = image_file.read()
+        image_file.seek(0)  # Reset file pointer for saving later
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Run inference
+        results = model.predict(image, conf=0.25, verbose=False)
+        
+        animal_type = None
+        confidence = 0.0
+        annotated_image_data = None
+        
+        if results and len(results) > 0:
+            result = results[0]
+            
+            if result.probs is not None:
+                # Classification mode
+                confidence = float(result.probs.top1conf)
+                class_id = int(result.probs.top1)
+                animal_type = result.names[class_id]
+                # For classification, annotated image is same as original
+                annotated_image_data = image_data
+            elif result.boxes and len(result.boxes) > 0:
+                # Detection mode - get annotated image with bounding boxes
+                best_box = result.boxes[0]
+                confidence = float(best_box.conf[0])
+                class_id = int(best_box.cls[0])
+                animal_type = result.names[class_id]
+                
+                # Generate annotated image with bounding boxes
+                annotated_array = result.plot()  # Returns numpy array with boxes drawn
+                annotated_pil = Image.fromarray(annotated_array)
+                
+                # Convert to bytes
+                annotated_buffer = io.BytesIO()
+                annotated_pil.save(annotated_buffer, format='JPEG', quality=90)
+                annotated_image_data = annotated_buffer.getvalue()
+        
+        return animal_type, confidence, annotated_image_data
+    
+    def post(self, request):
+        serializer = CapturedImageUploadSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        
+        device_id = serializer.validated_data['device_id']
+        image_file = serializer.validated_data['image']
+        
+        try:
+            # Run YOLO classification
+            animal_type, confidence, annotated_image_data = self.classify_image(image_file)
+            
+            # Handle no detection
+            if not animal_type:
+                return Response({
+                    "status": "no_detection",
+                    "message": "No animal detected in the image",
+                    "data": {
+                        "device_id": device_id,
+                        "animal_type": None,
+                        "confidence": 0.0,
+                        "timestamp": None
+                    }
+                }, status=status.HTTP_200_OK)
+            
+            # Normalize animal type to match class labels
+            animal_type_map = {
+                "bision": "Bison",
+                "bison": "Bison",
+                "boar": "Boar",
+                "wild boar": "Boar",
+                "leopord": "Leopard",
+                "leopard": "Leopard",
+                "bear": "Bear",
+                "elephant": "Elephant",
+                "human": "Human",
+                "lion": "Lion",
+                "tiger": "Tiger",
+            }
+            normalized_key = str(animal_type).strip().lower()
+            animal_type = animal_type_map.get(normalized_key, animal_type)
+
+            # Validate animal type
+            valid_animals = [choice[0] for choice in CapturedImage.ANIMAL_CHOICES]
+            if animal_type not in valid_animals:
+                animal_type = "Human"  # Default fallback
+            
+            # Get or create device
+            device, _ = Device.objects.get_or_create(device_id=device_id)
+            
+            # Save captured image
+            captured_image = CapturedImage.objects.create(
+                device=device,
+                image=image_file,
+                animal_type=animal_type,
+                confidence=confidence
+            )
+            
+            # Save annotated image if available
+            if annotated_image_data:
+                annotated_filename = f"annotated_{captured_image.id}.jpg"
+                captured_image.annotated_image.save(
+                    annotated_filename,
+                    ContentFile(annotated_image_data),
+                    save=True
+                )
+            
+            # Build response
+            image_url = None
+            annotated_url = None
+            if captured_image.image:
+                image_url = request.build_absolute_uri(captured_image.image.url)
+            if captured_image.annotated_image:
+                annotated_url = request.build_absolute_uri(captured_image.annotated_image.url)
+            
+            # Send wildlife alerts (WhatsApp to nearby users, call to device owner)
+            send_wildlife_alerts(device, animal_type, confidence, annotated_url or image_url)
+            
+            return Response({
+                "status": "success",
+                "message": "Image captured and classified",
+                "data": {
+                    "id": captured_image.id,
+                    "device_id": captured_image.device.device_id,
+                    "animal_type": captured_image.animal_type,
+                    "confidence": captured_image.confidence,
+                    "confidence_percentage": f"{captured_image.confidence * 100:.2f}%",
+                    "timestamp": captured_image.timestamp.isoformat(),
+                    "image_url": image_url,
+                    "annotated_image_url": annotated_url
+                }
+            }, status=status.HTTP_201_CREATED)
+            
+        except FileNotFoundError as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response({"error": f"Classification error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CapturedImageListView(generics.ListAPIView):
+    """List captured images based on user access level.
+    - Rangers: See all images from all devices
+    - Device owners: See only images from their own devices
+    - Public users: See recent alerts (no exact locations, boxed images only)
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CapturedImageSerializer
     
     def get_queryset(self):
         user = self.request.user
+        queryset = CapturedImage.objects.all()
         
-        if user.role == 'RANGER' or user.role == 'ADMIN':
-            queryset = ImageCapture.objects.all()
+        # Check user type
+        is_ranger = hasattr(user, 'profile') and user.profile.user_type == 'ranger'
+        
+        if is_ranger:
+            # Rangers see all images
+            pass
         else:
-            queryset = ImageCapture.objects.filter(device__owner=user)
+            # Check if user owns any devices
+            owned_devices = Device.objects.filter(owned_by=user)
+            
+            if owned_devices.exists():
+                # Device owners see only their device images
+                queryset = queryset.filter(device__in=owned_devices)
+            else:
+                # Public users without devices: see recent alerts (last 24 hours)
+                from django.utils import timezone
+                from datetime import timedelta
+                last_24_hours = timezone.now() - timedelta(hours=24)
+                queryset = queryset.filter(timestamp__gte=last_24_hours)
         
-        # Filters
-        device_id = self.request.query_params.get('device', None)
+        # Filter by device_id
+        device_id = self.request.query_params.get('device_id')
         if device_id:
-            queryset = queryset.filter(device__id=device_id)
+            queryset = queryset.filter(device__device_id=device_id)
         
-        ai_processed = self.request.query_params.get('ai_processed', None)
-        if ai_processed is not None:
-            queryset = queryset.filter(
-                ai_processed=ai_processed.lower() == 'true'
-            )
-        
-        return queryset.select_related('device', 'device__owner').prefetch_related('detections')
-
-
-class AnimalDetectionViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for animal detections
-    """
-    serializer_class = AnimalDetectionSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.role == 'RANGER' or user.role == 'ADMIN':
-            queryset = AnimalDetection.objects.all()
-        else:
-            queryset = AnimalDetection.objects.filter(
-                image__device__owner=user
-            )
-        
-        # Filters
-        animal_type = self.request.query_params.get('animal_type', None)
+        # Filter by animal_type
+        animal_type = self.request.query_params.get('animal_type')
         if animal_type:
             queryset = queryset.filter(animal_type=animal_type)
         
-        risk_level = self.request.query_params.get('risk_level', None)
-        if risk_level:
-            queryset = queryset.filter(risk_level=risk_level)
-        
-        device_id = self.request.query_params.get('device', None)
-        if device_id:
-            queryset = queryset.filter(image__device__id=device_id)
-        
-        return queryset.select_related(
-            'image', 'image__device', 'verified_by'
-        ).order_by('-detected_at')
+        return queryset.order_by('-timestamp')
     
-    @action(detail=True, methods=['post'], permission_classes=[CanVerifyDetection])
-    def verify(self, request, pk=None):
-        """
-        Verify a detection (Rangers only)
-        POST /api/detections/{id}/verify
-        """
-        detection = self.get_object()
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
         
-        serializer = DetectionVerificationSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        # Add user access info to response
+        user = request.user
+        is_ranger = hasattr(user, 'profile') and user.profile.user_type == 'ranger'
+        owned_devices = Device.objects.filter(owned_by=user).count()
         
-        detection.verified = serializer.validated_data['verified']
-        detection.verified_by = request.user
-        detection.verification_notes = serializer.validated_data.get(
-            'verification_notes', ''
-        )
-        detection.save()
-        
-        # Audit log
-        create_audit_log(
-            request.user, 'VERIFY_DETECTION', 'AnimalDetection',
-            detection.id, request,
-            {'verified': detection.verified}
-        )
-        
-        return Response(AnimalDetectionSerializer(detection).data)
+        return Response({
+            "count": queryset.count(),
+            "images": serializer.data,
+            "access_level": "ranger" if is_ranger else ("device_owner" if owned_devices > 0 else "public"),
+            "owned_devices_count": owned_devices
+        })
 
 
-# ============================================================================
-# ALERT VIEWS
-# ============================================================================
+# ==================== Test View ====================
 
-class AlertViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet for viewing alerts
-    """
-    serializer_class = AlertSerializer
+class TestView(APIView):
+    """Test endpoint for JWT authentication."""
     permission_classes = [IsAuthenticated]
     
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.role == 'RANGER' or user.role == 'ADMIN':
-            # Rangers see all alerts
-            queryset = Alert.objects.all()
-        else:
-            # Users see only their alerts
-            queryset = Alert.objects.filter(recipient=user)
-        
-        # Filters
-        status_filter = self.request.query_params.get('status', None)
-        if status_filter:
-            queryset = queryset.filter(status=status_filter)
-        
-        alert_type = self.request.query_params.get('alert_type', None)
-        if alert_type:
-            queryset = queryset.filter(alert_type=alert_type)
-        
-        return queryset.select_related(
-            'detection', 'detection__image', 'detection__image__device',
-            'recipient'
-        ).order_by('-created_at')
+    def get(self, request):
+        return Response({
+            "message": "JWT Authentication is working!",
+            "user": str(request.user)
+        })
+
+
+class TestWhatsAppView(APIView):
+    """Test WhatsApp messaging via Twilio."""
+    permission_classes = [AllowAny]
     
-    @action(detail=True, methods=['post'])
-    def acknowledge(self, request, pk=None):
+    def post(self, request):
         """
-        Acknowledge an alert
-        POST /api/alerts/{id}/acknowledge
-        """
-        alert = self.get_object()
+        Send a test WhatsApp message.
         
-        # Only recipient can acknowledge
-        if alert.recipient != request.user:
+        Request body:
+        {
+            "phone_number": "+1234567890",  # Required: recipient phone number in international format
+            "message": "Test message"        # Optional: custom message (default: test message)
+        }
+        """
+        from .notifications import send_whatsapp_message, get_twilio_client
+        from django.conf import settings
+        
+        phone_number = request.data.get('phone_number')
+        custom_message = request.data.get('message')
+        
+        if not phone_number:
             return Response(
-                {'error': 'Permission denied'},
-                status=status.HTTP_403_FORBIDDEN
+                {"error": "phone_number is required"},
+                status=status.HTTP_400_BAD_REQUEST
             )
         
-        alert.status = 'ACKNOWLEDGED'
-        alert.acknowledged_at = timezone.now()
-        alert.save()
+        # Check Twilio configuration
+        client = get_twilio_client()
+        if not client:
+            return Response(
+                {
+                    "error": "Twilio is not configured",
+                    "details": "Please set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_NUMBER in your environment"
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
         
-        return Response(AlertSerializer(alert).data)
+        whatsapp_number = getattr(settings, 'TWILIO_WHATSAPP_NUMBER', None)
+        if not whatsapp_number:
+            return Response(
+                {"error": "TWILIO_WHATSAPP_NUMBER is not configured"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        
+        # Compose test message
+        message = custom_message or (
+            f"🧪 TEST MESSAGE from Wildlife Watch\n\n"
+            f"This is a test message to verify WhatsApp integration is working correctly.\n\n"
 
-
-# ============================================================================
-# DASHBOARD AND STATISTICS
-# ============================================================================
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def dashboard_stats_view(request):
-    """
-    Get dashboard statistics
-    GET /api/dashboard/stats
-    """
-    user = request.user
-    
-    if user.role == 'RANGER' or user.role == 'ADMIN':
-        # Rangers see all stats
-        devices = IoTDevice.objects.all()
-        images = ImageCapture.objects.all()
-        detections = AnimalDetection.objects.all()
-        alerts = Alert.objects.all()
-    else:
-        # Farmers see only their stats
-        devices = IoTDevice.objects.filter(owner=user)
-        images = ImageCapture.objects.filter(device__owner=user)
-        detections = AnimalDetection.objects.filter(image__device__owner=user)
-        alerts = Alert.objects.filter(recipient=user)
-    
-    # Aggregate statistics
-    stats = {
-        'total_devices': devices.count(),
-        'active_devices': devices.filter(is_active=True).count(),
-        'total_images': images.count(),
-        'total_detections': detections.count(),
-        'critical_alerts': alerts.filter(
-            detection__risk_level='CRITICAL',
-            status='SENT'
-        ).count(),
-        'recent_detections': AnimalDetectionSerializer(
-            detections.order_by('-detected_at')[:10],
-            many=True
-        ).data,
-        'detection_by_animal': dict(
-            detections.values('animal_type').annotate(
-                count=Count('id')
-            ).values_list('animal_type', 'count')
-        ),
-        'detection_by_risk': dict(
-            detections.values('risk_level').annotate(
-                count=Count('id')
-            ).values_list('risk_level', 'count')
+            f"If you received this, your Twilio WhatsApp setup is working!"
         )
-    }
-    
-    return Response(stats)
+        
+        # Send the message
+        message_sid = send_whatsapp_message(phone_number, message)
+        
+        if message_sid:
+            return Response({
+                "success": True,
+                "message": "WhatsApp message sent successfully",
+                "message_sid": message_sid,
+                "sent_to": phone_number
+            })
+        else:
+            return Response(
+                {
+                    "success": False,
+                    "error": "Failed to send WhatsApp message",
+                    "details": "Check server logs for more information. Common issues: invalid phone number format, unverified recipient in Twilio sandbox."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
-# ============================================================================
-# AUDIT LOG VIEWS (Admin/Ranger only)
-# ============================================================================
+class TestSMSView(APIView):
+    """Test SMS messaging via Twilio."""
+    permission_classes = [AllowAny]
 
-class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet for viewing audit logs (Rangers and Admins only)
-    """
-    serializer_class = AuditLogSerializer
-    permission_classes = [IsRangerOrAdmin]
-    queryset = AuditLog.objects.all().select_related('user').order_by('-created_at')
-    
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        
-        # Filters
-        user_id = self.request.query_params.get('user', None)
-        if user_id:
-            queryset = queryset.filter(user__id=user_id)
-        
-        action = self.request.query_params.get('action', None)
-        if action:
-            queryset = queryset.filter(action=action)
-        
-        return queryset
+    def post(self, request):
+        """
+        Send a test SMS message.
+
+        Request body:
+        {
+            "phone_number": "+1234567890",  # Required: recipient phone number in international format
+            "message": "Test message"        # Optional: custom message (default: test message)
+        }
+        """
+        from .notifications import send_sms_message, get_twilio_client
+        from django.conf import settings
+
+        phone_number = request.data.get('phone_number')
+        custom_message = request.data.get('message')
+
+        if not phone_number:
+            return Response(
+                {"error": "phone_number is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check Twilio configuration
+        client = get_twilio_client()
+        if not client:
+            return Response(
+                {
+                    "error": "Twilio is not configured",
+                    "details": "Please set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in your environment"
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+
+        phone_number_from = getattr(settings, 'TWILIO_PHONE_NUMBER', None)
+        if not phone_number_from:
+            return Response(
+                {"error": "TWILIO_PHONE_NUMBER is not configured"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+
+        # Compose test message
+        message = custom_message or (
+            f"🧪 TEST SMS from Wildlife Watch\n\n"
+            f"This is a test SMS to verify Twilio integration is working correctly.\n\n"
+            f"If you received this, your Twilio SMS setup is working!"
+        )
+
+        # Send the message
+        message_sid = send_sms_message(phone_number, message)
+
+        if message_sid:
+            return Response({
+                "success": True,
+                "message": "SMS sent successfully",
+                "message_sid": message_sid,
+                "sent_to": phone_number
+            })
+        else:
+            return Response(
+                {
+                    "success": False,
+                    "error": "Failed to send SMS",
+                    "details": "Check server logs for more information. Common issues: invalid phone number format, unverified recipient if using a Twilio trial account."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
