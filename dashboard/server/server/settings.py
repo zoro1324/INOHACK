@@ -12,11 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Security
 SECRET_KEY = config("SECRET_KEY")
 DEBUG = config("DEBUG", cast=bool, default=True)
-ALLOWED_HOSTS = config(
-    "ALLOWED_HOSTS",
-    cast=Csv(),
-    default="127.0.0.1,localhost,10.76.24.170",
-)
+ALLOWED_HOSTS = ['*']
 
 # Application definition
 INSTALLED_APPS = [
@@ -137,6 +133,17 @@ CORS_ALLOWED_ORIGINS = config(
     default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
 )
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
 
 # Twilio Configuration for WhatsApp and Voice Calls
 TWILIO_ACCOUNT_SID = config("TWILIO_ACCOUNT_SID", default="")
