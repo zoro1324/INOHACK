@@ -1,4 +1,9 @@
 model/zips
 model/animals
+model/dataset
 model/animal_with_noise
+model/runs
 venv
+*.pt
+
+model/train.ipynb
