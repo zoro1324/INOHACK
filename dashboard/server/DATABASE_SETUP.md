@@ -54,7 +54,14 @@ brew install mysql
 pip install mysqlclient
 ```
 
-### 4. Run Migrations
+### 4. Install Dependencies
+
+```bash
+# Install required packages
+pip install -r requirements.txt
+```
+
+### 5. Run Migrations
 
 ```bash
 # Create migrations for api app

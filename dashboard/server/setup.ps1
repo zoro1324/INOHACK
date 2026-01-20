@@ -46,15 +46,9 @@ if (Test-Path ".env") {
     Write-Host "✅ .env file created - Please edit with your configuration" -ForegroundColor Green
 }
 
-# Create logs directory
+# Logs directory will be created automatically by Django
 Write-Host ""
-Write-Host "📁 Creating logs directory..." -ForegroundColor Yellow
-if (!(Test-Path "logs")) {
-    New-Item -ItemType Directory -Path "logs" | Out-Null
-    Write-Host "✅ Logs directory created" -ForegroundColor Green
-} else {
-    Write-Host "⚠️  Logs directory already exists" -ForegroundColor Yellow
-}
+Write-Host "✅ Logs directory will be auto-created" -ForegroundColor Green
 
 # Create media directory
 Write-Host ""

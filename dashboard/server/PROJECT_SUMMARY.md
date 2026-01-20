@@ -161,12 +161,12 @@ dashboard/server/
 
 # OR manually:
 python -m venv venv
-venv\Scripts\activate
+.\venv\Scripts\Activate.ps1  # PowerShell
 pip install -r requirements.txt
-cp .env.example .env
+Copy-Item .env.example .env  # PowerShell
 # Edit .env with your settings
-mkdir logs
-mkdir media
+# logs directory is auto-created
+mkdir media -ErrorAction SilentlyContinue
 ```
 
 ### 2. Database
@@ -174,7 +174,7 @@ mkdir media
 ```bash
 # Create MySQL database
 mysql -u root -p
-CREATE DATABASE animal_detection_db;
+CREATE DATABASE animal_detection_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 EXIT;
 
 # Run migrations
