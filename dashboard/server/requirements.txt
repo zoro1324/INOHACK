@@ -1,0 +1,43 @@
+# Django Core
+Django==5.2.10
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.1
+
+# Database
+mysqlclient==2.2.4
+
+# CORS
+django-cors-headers==4.3.1
+
+# API Documentation
+drf-yasg==1.21.7
+
+# Celery & Redis
+celery==5.3.6
+redis==5.0.1
+django-redis==5.4.0
+
+# Image Processing
+Pillow==10.2.0
+
+# HTTP Requests
+requests==2.31.0
+
+# Environment Variables
+python-decouple==3.8
+
+# Timezone
+pytz==2024.1
+
+# Production Server (Optional)
+gunicorn==21.2.0
+whitenoise==6.6.0
+
+# Testing (Optional)
+pytest==7.4.4
+pytest-django==4.7.0
+factory-boy==3.3.0
+
+# Code Quality (Optional)
+flake8==7.0.0
+black==24.1.1
